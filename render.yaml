@@ -14,6 +14,8 @@ services:
         value: syncboard-public
       - key: REDIS_URL
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false
   - type: web
     name: syncboard-instance-b
     runtime: docker
@@ -32,4 +34,5 @@ services:
           name: syncboard-public-ebsk
           type: web
           envVarKey: REDIS_URL
-
+      - key: OPENAI_API_KEY
+        sync: false

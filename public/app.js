@@ -38,7 +38,7 @@ const state = {
   socket: null, joined: false, everConnected: false, loading: true, canEdit: true, pointerWorld: null,
   lastPresenceAt: 0, drawQueued: false, resizeObserver: null, db: null, reconnectAttempt: 0, reconnectTimer: 0,
   liveObjectCount: 0, objectOrder: new Map(), nextObjectOrder: 0, worldBounds: null,
-  activity: [], metrics: { p95: 28, ops: 0, users: 1 }, toastTimer: 0,
+  activity: [], aiDraft: null, metrics: { p95: 28, ops: 0, users: 1 }, toastTimer: 0,
   title: boardId.startsWith('stress-') ? 'A lot of little ideas' : 'The next big thing'
 };
 
@@ -1011,6 +1011,72 @@ function setGridVisible(visible, persist = true) {
 }
 setGridVisible(state.gridVisible, false);
 gridToggle.addEventListener('click', () => setGridVisible(!state.gridVisible));
+const aiDialog = $('#aiDialog');
+function setAiStatus(message, isError = false) {
+  const status = $('#aiStatus'); status.textContent = message; status.classList.toggle('is-error', isError);
+}
+function showAiDraft(draft) {
+  state.aiDraft = draft;
+  $('#aiMapTitle').textContent = draft.title; $('#aiMapGoal').textContent = draft.goal;
+  $('#aiIdeaCount').textContent = `${draft.ideas.length} IDEAS`;
+  const preview = $('#aiIdeaPreview'); preview.replaceChildren();
+  draft.ideas.forEach((idea) => {
+    const card = document.createElement('article'); card.className = 'ai-idea-card'; card.dataset.lane = idea.lane.toLowerCase();
+    const lane = document.createElement('span'); lane.textContent = idea.lane;
+    const title = document.createElement('strong'); title.textContent = idea.title;
+    const detail = document.createElement('p'); detail.textContent = idea.detail;
+    card.append(lane, title, detail); preview.append(card);
+  });
+  $('#aiPreview').classList.remove('hidden'); $('#aiApply').disabled = false;
+}
+function addAiMapToBoard() {
+  const draft = state.aiDraft;
+  if (!draft) return;
+  if (!state.canEdit) return setAiStatus('This board is read-only right now.', true);
+  const centerX = (stage.clientWidth / 2 - state.panX) / state.zoom;
+  const centerY = (stage.clientHeight / 2 - state.panY) / state.zoom;
+  const cardWidth = 230; const cardHeight = 150;
+  const offsets = [-370, 0, 370];
+  const rows = [-280, 130];
+  const fills = { Explore: '#e5edff', Create: '#fff0b9', Deliver: '#e8f5d5' };
+  const ideas = draft.ideas.map((idea, index) => ({ ...idea, x: centerX + offsets[index % 3] - cardWidth / 2, y: centerY + rows[Math.floor(index / 3)] }));
+  const rootId = makeId('ai'); const group = [];
+  for (const idea of ideas) {
+    localOperation(makeId('ai'), 'upsert', { type: 'connector', x: centerX, y: centerY, w: idea.x + cardWidth / 2 - centerX, h: idea.y + cardHeight / 2 - centerY, stroke: '#aab6c5', strokeWidth: 2, arrow: false }, { group });
+  }
+  localOperation(rootId, 'upsert', { type: 'sticky', x: centerX - 140, y: centerY - 74, w: 280, h: 148, text: `${draft.title}\n\n${draft.goal}`, fill: '#f0e7ff', color: '#594783', fontSize: 18, radius: 14, label: 'AI MAP' }, { group });
+  ideas.forEach((idea, index) => localOperation(makeId('ai'), 'upsert', { type: 'sticky', x: idea.x, y: idea.y, w: cardWidth, h: cardHeight, text: `${idea.title}\n\n${idea.detail}`, fill: fills[idea.lane] || palette[index % palette.length], color: '#465164', fontSize: 15, radius: 13, label: idea.lane.toUpperCase(), rotation: (index % 3 - 1) * .6 }, { group }));
+  commitGroup(group);
+  const mapZoom = clamp(Math.min(1, (stage.clientWidth - 50) / 960, (stage.clientHeight - 70) / 560), .25, 1);
+  state.zoom = mapZoom; state.panX = stage.clientWidth / 2 - centerX * mapZoom; state.panY = stage.clientHeight / 2 - centerY * mapZoom;
+  updateZoomUi(); setSelection([rootId]);
+  aiDialog.close(); toast('Your AI idea map is on the shared board. Undo removes the whole map.');
+}
+$('#aiCopilotButton').addEventListener('click', async () => {
+  state.aiDraft = null; $('#aiPreview').classList.add('hidden'); $('#aiApply').disabled = true;
+  $('#aiPrompt').value = ''; setAiStatus('Checking AI availability…'); aiDialog.showModal(); $('#aiPrompt').focus();
+  try {
+    const response = await fetch('/api/ai/status', { cache: 'no-store' }); const status = await response.json();
+    setAiStatus(status.enabled ? 'Ready. Your map will appear here for review.' : 'Add OPENAI_API_KEY to both Render services to enable drafting.', !status.enabled);
+  } catch { setAiStatus('Could not reach the AI service. You can retry in a moment.', true); }
+});
+$('#aiClose').addEventListener('click', () => aiDialog.close());
+aiDialog.addEventListener('click', (event) => { if (event.target === aiDialog) aiDialog.close(); });
+$('#aiGenerate').addEventListener('click', async () => {
+  const prompt = $('#aiPrompt').value.trim();
+  if (prompt.length < 8) return setAiStatus('Add a little more detail so AI can make useful ideas.', true);
+  const button = $('#aiGenerate'); const label = button.querySelector('span');
+  button.disabled = true; label.textContent = 'Dreaming up ideas…'; state.aiDraft = null; $('#aiPreview').classList.add('hidden'); $('#aiApply').disabled = true;
+  setAiStatus('Connecting the dots…');
+  try {
+    const response = await fetch('/api/ai/idea-map', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'AI could not draft ideas.');
+    showAiDraft(result); setAiStatus('Draft ready. Apply it when your team is happy with the ideas.');
+  } catch (error) { setAiStatus(error.message || 'AI could not draft ideas. Try again.', true); }
+  finally { button.disabled = false; label.textContent = 'Draft an idea map'; }
+});
+$('#aiApply').addEventListener('click', addAiMapToBoard);
 $('#outlineButton').addEventListener('click', () => setInspectorPanel('layers'));
 $('#historyButton').addEventListener('click', () => setInspectorPanel('activity'));
 

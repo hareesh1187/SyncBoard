@@ -14,6 +14,7 @@
 <body>
   <svg class="svg-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 2 1.7 6.3L20 10l-6.3 1.7L12 18l-1.7-6.3L4 10l6.3-1.7L12 2Z"/><path d="m19 16 .8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16Z"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 1 1 8 0v3"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
     <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.5 4.5"/></symbol>
@@ -95,6 +96,7 @@
           <div class="board-location"><span class="location-icon">✳</span><span>WORKSHOP / IDEATION</span><svg class="mini-icon"><use href="#i-chevron"/></svg><span class="location-active">Untitled board</span></div>
           <div class="stage-top-actions">
             <button class="stage-action" id="historyButton"><svg><use href="#i-clock"/></svg><span>History</span></button>
+            <button class="stage-action ai-launcher" id="aiCopilotButton" type="button"><svg><use href="#i-spark"/></svg><span>AI Copilot</span></button>
             <button class="stage-action" id="loadTestButton"><span class="load-pulse"></span><span>Try 5,000 objects</span></button>
           </div>
         </div>
@@ -195,6 +197,30 @@
       <div class="share-link-row"><input id="shareUrl" type="text" readonly aria-label="Link to this shared board" value="Loading shared board link…" /><button type="button" id="copyLink"><svg><use href="#i-link"/></svg> Copy link</button></div>
       <div class="share-note"><span class="share-lock">✳</span><span>Same team room: <code id="shareRoomId">studio</code>. Everyone with this link edits this board.</span></div>
     </form>
+  </dialog>
+
+  <dialog class="ai-dialog" id="aiDialog" aria-labelledby="aiDialogTitle">
+    <div class="ai-card">
+      <button class="dialog-close" id="aiClose" type="button" aria-label="Close AI copilot"><svg><use href="#i-x"/></svg></button>
+      <div class="ai-mark"><svg><use href="#i-spark"/></svg></div>
+      <span class="eyebrow">A LITTLE HELP FROM AI</span>
+      <h2 id="aiDialogTitle">Turn a challenge into a map.</h2>
+      <p class="ai-intro">Describe what your team is trying to solve. Review six ideas before they join the shared canvas.</p>
+      <label class="ai-prompt-label" for="aiPrompt">YOUR CHALLENGE</label>
+      <textarea id="aiPrompt" maxlength="700" rows="3" placeholder="How might we make first-time users feel at home?"></textarea>
+      <div class="ai-privacy-note"><svg><use href="#i-lock"/></svg><span>Your prompt is sent to OpenAI for drafting. Nothing is added until you choose to apply it.</span></div>
+      <div class="ai-status" id="aiStatus" role="status" aria-live="polite"></div>
+      <section class="ai-preview hidden" id="aiPreview" aria-label="AI idea map preview">
+        <div class="ai-preview-meta"><span>YOUR DRAFT MAP</span><span id="aiIdeaCount">6 IDEAS</span></div>
+        <h3 id="aiMapTitle"></h3>
+        <p class="ai-map-goal" id="aiMapGoal"></p>
+        <div class="ai-idea-grid" id="aiIdeaPreview"></div>
+      </section>
+      <div class="ai-actions">
+        <button class="ai-generate" id="aiGenerate" type="button"><svg><use href="#i-spark"/></svg><span>Draft an idea map</span></button>
+        <button class="ai-apply" id="aiApply" type="button" disabled>Bring it to the canvas <svg><use href="#i-chevron"/></svg></button>
+      </div>
+    </div>
   </dialog>
 
   <dialog class="name-dialog" id="nameDialog">
