@@ -124,6 +124,8 @@ kbd { min-width: 17px; padding: 2px 4px; border: 1px solid #dadee4; border-botto
 .zoom-value { width: 43px; padding: 0; border: 0; color: #5e6878; background: transparent; font: 500 9px 'DM Mono',monospace; cursor: pointer; }
 .zoom-divider { height: 17px; margin: 0 2px; border-left: 1px solid #e8e9e5; }
 .fit-button { color: #646e7d; }
+.grid-toggle[aria-pressed="true"] { color: #647c3b; background: #eff5e4; }
+.grid-toggle:focus-visible { outline: 2px solid #a6bf76; outline-offset: 1px; }
 .mini-map { position: absolute; z-index: 5; right: 24px; bottom: 76px; width: 105px; height: 68px; overflow: hidden; border: 1px solid rgba(222,225,218,.95); border-radius: 9px; background: rgba(255,255,255,.74); box-shadow: 0 5px 18px rgba(36,44,57,.08); cursor: pointer; transition: transform .2s, box-shadow .2s; }
 .mini-map:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(36,44,57,.12); }
 .mini-map:before { content: ''; position: absolute; inset: 7px 11px 14px; opacity: .75; background-image: linear-gradient(135deg,#dae5ff 0 30%,transparent 30% 34%,#e3f2c2 34% 62%,transparent 62% 66%,#f4ddcf 66%); border-radius: 3px; }
@@ -403,6 +405,7 @@ dialog::backdrop { background: rgba(28,36,49,.35); backdrop-filter: blur(5px); a
   background-image: radial-gradient(rgba(87,98,103,.2) .75px,transparent .75px), linear-gradient(135deg,#f4f3ed 0%,#f9f8f3 48%,#f0f1f5 100%);
   background-size: 22px 22px, 100% 100%;
 }
+.canvas-stage.grid-hidden { background-image: linear-gradient(135deg,#f4f3ed 0%,#f9f8f3 48%,#f0f1f5 100%); background-size: 100% 100%; }
 .canvas-stage::before {
   content: ''; position: absolute; z-index: 0; inset: -30%; pointer-events: none; opacity: .82; filter: blur(20px);
   background:

@@ -48,6 +48,8 @@ const stage = $('#canvasStage');
 const cursorLayer = $('#cursorLayer');
 const syncPill = $('#syncPill');
 const syncLabel = $('#syncLabel');
+state.gridVisible = safeRead('syncboard:grid', '1') !== '0';
+stage.classList.toggle('grid-hidden', !state.gridVisible);
 const canvasRect = () => canvas.getBoundingClientRect();
 
 let spotlightFrame = 0;
@@ -588,7 +590,7 @@ function handleSocketMessage(message) {
     if (!person || person.id === state.clientId) return;
     const previous = state.users.get(person.id);
     state.users.set(person.id, person);
-    if (!previous || previous.activeObject !== person.activeObject) renderPresence();
+    if (!previous || previous.activeObject !== person.activeObject || Boolean(previous.cursor) !== Boolean(person.cursor)) renderPresence();
     else renderCursor(person);
     return;
   }
@@ -654,8 +656,51 @@ function renderPresence() {
   $('#peopleCount').textContent = String(people.length);
   $('#metricUsers').textContent = String(people.length);
   const initials = (name) => String(name || '?').trim().split(/\s+/).slice(0, 2).map((word) => word[0]).join('').toUpperCase();
-  $('#topAvatars').innerHTML = people.slice(0, 4).map((person, index) => `<span class="avatar" title="${escapeHtml(person.name)}" style="z-index:${10 - index};background:${escapeHtml(person.color || '#dce5fb')};animation-delay:${index * 45}ms">${escapeHtml(initials(person.name))}</span>`).join('') + (people.length > 4 ? `<span class="avatar more-people" title="${people.length - 4} more">+${people.length - 4}</span>` : '');
-  $('#peopleList').innerHTML = people.slice(0, 8).map((person, index) => `<div class="person-row" style="animation-delay:${index * 35}ms"><span class="person-avatar" style="background:${escapeHtml(person.color || '#dce5fb')}">${escapeHtml(initials(person.name))}</span><span class="person-details"><span class="person-name">${escapeHtml(person.name)}${person.id === state.clientId ? ' (you)' : ''}</span><span class="person-status">${person.activeObject ? 'Editing an object' : person.cursor ? 'Exploring the board' : 'Around today'}</span></span>${person.id === state.clientId ? '<span class="person-self">YOU</span>' : ''}</div>`).join('');
+  const arrange = (container, nodes) => {
+    nodes.forEach((node, index) => {
+      if (container.children[index] !== node) container.insertBefore(node, container.children[index] || null);
+    });
+    const keep = new Set(nodes);
+    [...container.children].forEach((node) => { if (!keep.has(node)) node.remove(); });
+  };
+  const avatarHost = $('#topAvatars');
+  const existingAvatars = new Map([...avatarHost.children].filter((node) => node.dataset.personId).map((node) => [node.dataset.personId, node]));
+  const avatarNodes = people.slice(0, 4).map((person, index) => {
+    let node = existingAvatars.get(person.id);
+    if (!node) { node = document.createElement('span'); node.className = 'avatar'; node.dataset.personId = person.id; }
+    node.title = person.name || 'Collaborator'; node.textContent = initials(person.name);
+    node.style.zIndex = String(10 - index); node.style.backgroundColor = person.color || '#dce5fb';
+    return node;
+  });
+  if (people.length > 4) {
+    let more = [...avatarHost.children].find((node) => node.dataset.morePeople === 'true');
+    if (!more) { more = document.createElement('span'); more.className = 'avatar more-people'; more.dataset.morePeople = 'true'; }
+    more.title = `${people.length - 4} more`; more.textContent = `+${people.length - 4}`; avatarNodes.push(more);
+  }
+  arrange(avatarHost, avatarNodes);
+
+  const list = $('#peopleList');
+  const existingRows = new Map([...list.children].map((node) => [node.dataset.personId, node]));
+  const rows = people.slice(0, 8).map((person) => {
+    let row = existingRows.get(person.id);
+    if (!row) {
+      row = document.createElement('div'); row.className = 'person-row'; row.dataset.personId = person.id;
+      const avatar = document.createElement('span'); avatar.className = 'person-avatar';
+      const details = document.createElement('span'); details.className = 'person-details';
+      const name = document.createElement('span'); name.className = 'person-name';
+      const status = document.createElement('span'); status.className = 'person-status';
+      const self = document.createElement('span'); self.className = 'person-self'; self.textContent = 'YOU';
+      details.append(name, status); row.append(avatar, details, self);
+    }
+    const [avatar, details, self] = row.children;
+    const [name, status] = details.children;
+    avatar.textContent = initials(person.name); avatar.style.backgroundColor = person.color || '#dce5fb';
+    name.textContent = `${person.name || 'Collaborator'}${person.id === state.clientId ? ' (you)' : ''}`;
+    status.textContent = person.activeObject ? 'Editing an object' : person.cursor ? 'Exploring the board' : 'Around today';
+    self.hidden = person.id !== state.clientId;
+    return row;
+  });
+  arrange(list, rows);
   renderCursors();
 }
 
@@ -954,6 +999,18 @@ $$('[data-tool]').forEach((button) => button.addEventListener('click', () => sel
 $('#undoButton').addEventListener('click', undo); $('#redoButton').addEventListener('click', redo); $('#quickUndo').addEventListener('click', undo); $('#quickRedo').addEventListener('click', redo);
 $('#zoomOut').addEventListener('click', () => zoomAt(state.zoom / 1.15)); $('#zoomIn').addEventListener('click', () => zoomAt(state.zoom * 1.15));
 $('#zoomValue').addEventListener('click', fitBoard); $('#fitBoard').addEventListener('click', fitBoard); $('#miniMap').addEventListener('click', fitBoard);
+const gridToggle = $('#gridToggle');
+function setGridVisible(visible, persist = true) {
+  state.gridVisible = Boolean(visible);
+  stage.classList.toggle('grid-hidden', !state.gridVisible);
+  const label = state.gridVisible ? 'Hide canvas grid' : 'Show canvas grid';
+  gridToggle.setAttribute('aria-pressed', String(state.gridVisible));
+  gridToggle.setAttribute('aria-label', label);
+  gridToggle.title = label;
+  if (persist) safeWrite('syncboard:grid', state.gridVisible ? '1' : '0');
+}
+setGridVisible(state.gridVisible, false);
+gridToggle.addEventListener('click', () => setGridVisible(!state.gridVisible));
 $('#outlineButton').addEventListener('click', () => setInspectorPanel('layers'));
 $('#historyButton').addEventListener('click', () => setInspectorPanel('activity'));
 
