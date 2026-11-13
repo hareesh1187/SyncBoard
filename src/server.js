@@ -330,21 +330,40 @@ class RedisStore {
   async presenceSet(boardId, person) {
     this.assertReady();
     const key = this.key(boardId, `presence:${person.id}`);
-    await this.client.set(key, JSON.stringify({ ...person, instanceId: INSTANCE_ID }), { EX: PRESENCE_TTL });
+    const index = this.key(boardId, 'presence-index');
+    await this.client.multi()
+      .set(key, JSON.stringify({ ...person, instanceId: INSTANCE_ID }), { EX: PRESENCE_TTL })
+      .sAdd(index, person.id)
+      .exec();
     await this.client.publish('syncboard:events', JSON.stringify({ type: 'presence', boardId, person: { ...person, instanceId: INSTANCE_ID } }));
   }
   async presenceDelete(boardId, id) {
     this.assertReady();
-    await this.client.del(this.key(boardId, `presence:${id}`));
+    await this.client.multi()
+      .del(this.key(boardId, `presence:${id}`))
+      .sRem(this.key(boardId, 'presence-index'), id)
+      .exec();
     await this.client.publish('syncboard:events', JSON.stringify({ type: 'presence-left', boardId, id }));
   }
   async presenceList(boardId) {
     this.assertReady();
-    const keys = [];
-    for await (const key of this.client.scanIterator({ MATCH: this.key(boardId, 'presence:*'), COUNT: 100 })) keys.push(key);
-    if (!keys.length) return [];
+    const index = this.key(boardId, 'presence-index');
+    const prefix = this.key(boardId, 'presence:');
+    let ids = await this.client.sMembers(index);
+    // Migrate live presence written by an older server before the index existed.
+    if (!ids.length) {
+      for await (const key of this.client.scanIterator({ MATCH: this.key(boardId, 'presence:*'), COUNT: 100 })) ids.push(key.slice(prefix.length));
+      if (ids.length) await this.client.sAdd(index, ids);
+    }
+    if (!ids.length) return [];
+    const keys = ids.map((id) => this.key(boardId, `presence:${id}`));
     const values = await this.client.mGet(keys);
-    return values.filter(Boolean).map((raw) => JSON.parse(raw));
+    const present = []; const stale = [];
+    for (let index = 0; index < values.length; index += 1) {
+      if (values[index]) present.push(JSON.parse(values[index])); else stale.push(ids[index]);
+    }
+    if (stale.length) await this.client.sRem(index, stale);
+    return present;
   }
   async generateBoard(boardId, count) {
     this.assertReady();

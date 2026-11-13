@@ -53,7 +53,7 @@ function openClient(endpoint, index) {
   const client = { socket, clientId, seen: new Set(), instance: null };
   clients.push(client);
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`Client ${index + 1} did not join within 60 seconds.`)), 60_000);
+    const timeout = setTimeout(() => reject(new Error(`Client ${index + 1} did not join within 30 seconds.`)), 30_000);
     socket.once('error', (error) => { clearTimeout(timeout); reject(error); });
     socket.on('open', () => socket.send(JSON.stringify({
       type: 'join', boardId, clientId, name: `Demo ${index + 1}`, color: '#7891e8', cursor: '0-0'
@@ -92,7 +92,12 @@ async function main() {
   const apiBoardLoadMs = performance.now() - loadStarted;
   if (activeCount(initialBoard) !== 5000) throw new Error(`Expected 5,000 shapes; found ${activeCount(initialBoard)}.`);
 
-  await Promise.all(Array.from({ length: clientCount }, (_, index) => openClient(endpoints[index % 2], index)));
+  const joinBatchSize = 20;
+  for (let start = 0; start < clientCount; start += joinBatchSize) {
+    const batch = Array.from({ length: Math.min(joinBatchSize, clientCount - start) }, (_, offset) => start + offset);
+    await Promise.all(batch.map((index) => openClient(endpoints[index % 2], index)));
+    if (start + joinBatchSize < clientCount) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
   const instanceIds = [...new Set(clients.map((client) => client.instance))];
   if (instanceIds.length < 2) throw new Error('Connections did not reach two distinct app instances.');
 
@@ -139,4 +144,3 @@ try {
 } finally {
   for (const client of clients) { clearInterval(client.heartbeat); client.socket.terminate(); }
 }
-
