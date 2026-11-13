@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createClient } from 'redis';
 
@@ -14,6 +15,7 @@ const REDIS_URL = process.env.REDIS_URL;
 const PRESENCE_TTL = 5;
 const RATE_LIMIT = 240;
 const SNAPSHOT_INTERVAL = 800;
+const DEFAULT_BOARD_TITLE = 'The next big thing';
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml',
@@ -40,11 +42,20 @@ function shape(id, type, x, y, w, h, extra = {}) {
 }
 
 function seedSnapshot() {
-  return { version: 1, cursor: '0-0', objects: Object.fromEntries(SEED_OBJECTS.map((item) => [item.id, item])) };
+  const metadata = shape('board-meta', 'meta', 0, 0, 0, 0, { title: DEFAULT_BOARD_TITLE });
+  return { version: 1, purpose: 'demo-seed', cursor: '0-0', objects: Object.fromEntries([metadata, ...SEED_OBJECTS].map((item) => [item.id, item])) };
 }
 
 function safeBoardId(value) {
   return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(value) ? value : null;
+}
+
+function boardTitle(snapshot, operations = []) {
+  let title = snapshot?.objects?.['board-meta']?.title || DEFAULT_BOARD_TITLE;
+  for (const operation of operations) {
+    if (operation.entityId === 'board-meta' && typeof operation.fields?.title === 'string') title = operation.fields.title;
+  }
+  return title;
 }
 
 function stampCompare(a = [0, ''], b = [0, '']) {
@@ -114,7 +125,7 @@ class MemoryStore {
     const count = (this.limits.get(rateKey) || 0) + 1; this.limits.set(rateKey, count);
     if (count > RATE_LIMIT) return { error: 'rate_limited' };
     const streamId = `${Date.now()}-${++this.sequence}`;
-    const lamport = (this.clocks.get(boardId) || 0) + 1;
+    const lamport = Math.max(this.clocks.get(boardId) || 0, operation.lamport || 0) + 1;
     const event = { ...operation, boardId, lamport, streamId, serverAt: Date.now() };
     await this.persistOperation(event);
     this.clocks.set(boardId, lamport); this.seen.add(dedupKey);
@@ -138,14 +149,19 @@ class MemoryStore {
     return [...room.values()].map(({ expiresAt, ...person }) => person);
   }
   async generateBoard(boardId, count) {
+    const current = this.snapshots.get(boardId);
+    const hasEdits = (this.logs.get(boardId) || []).length > 0;
+    if (boardId !== 'stress-demo' || hasEdits || (current && current.purpose !== 'demo-seed')) return false;
     const objects = {};
     const palettes = ['#e4edff', '#edf8d7', '#f9e3d7', '#f2e6ff', '#fff0b6'];
     for (let i = 0; i < count; i += 1) {
       objects[`load-${i}`] = shape(`load-${i}`, i % 5 === 0 ? 'ellipse' : 'rect', (i % 100) * 180, Math.floor(i / 100) * 105, 70 + (i % 4) * 10, 42 + (i % 3) * 9, { rotation: (i % 5 - 2) * 2, fill: palettes[i % palettes.length], color: '#4b5670', stroke: '#aab5ca', strokeWidth: 1, text: '' });
     }
-    this.snapshots.set(boardId, { version: 1, cursor: '0-0', objects });
+    objects['board-meta'] = shape('board-meta', 'meta', 0, 0, 0, 0, { title: '5,000 object stress board' });
+    this.snapshots.set(boardId, { version: 1, purpose: 'stress-demo', cursor: '0-0', objects });
     this.logs.set(boardId, []);
     await this.persistSnapshots();
+    return true;
   }
   async sync(boardId, cursor) {
     const data = await this.board(boardId);
@@ -208,7 +224,7 @@ class FileStore extends MemoryStore {
 }
 
 class RedisStore {
-  constructor(url) { this.url = url; this.client = createClient({ url }); this.subscriber = this.client.duplicate(); this.listeners = new Set(); this.mode = 'redis'; }
+  constructor(url) { this.url = url; this.client = createClient({ url, disableOfflineQueue: true }); this.subscriber = this.client.duplicate(); this.listeners = new Set(); this.mode = 'redis'; }
   async start() {
     this.client.on('error', (error) => console.error(`[${INSTANCE_ID}] Redis`, error.message));
     this.subscriber.on('error', (error) => console.error(`[${INSTANCE_ID}] Redis subscriber`, error.message));
@@ -219,7 +235,9 @@ class RedisStore {
   }
   subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   key(boardId, suffix) { return `syncboard:${boardId}:${suffix}`; }
+  assertReady() { if (!this.client.isReady) { const error = new Error('Redis is unavailable.'); error.code = 'storage_unavailable'; throw error; } }
   async ensureSnapshot(boardId) {
+    this.assertReady();
     const key = this.key(boardId, 'snapshot');
     let raw = await this.client.get(key);
     if (!raw) {
@@ -247,9 +265,14 @@ class RedisStore {
   }
   async compact(boardId, currentSnapshot, events) {
     const lock = this.key(boardId, 'compact-lock');
-    const acquired = await this.client.set(lock, INSTANCE_ID, { NX: true, EX: 30 });
+    const token = `${INSTANCE_ID}:${randomUUID()}`;
+    const acquired = await this.client.set(lock, token, { NX: true, EX: 30 });
     if (!acquired) return;
     try {
+      // Always refresh after acquiring the lock. Callers may have read an older
+      // snapshot before another instance compacted and trimmed the stream.
+      currentSnapshot = await this.ensureSnapshot(boardId);
+      events = await this.readEvents(boardId, currentSnapshot.cursor || '0-0');
       const objects = { ...currentSnapshot.objects };
       for (const event of events) reduceOperation(objects, event);
       const last = events.at(-1);
@@ -257,7 +280,9 @@ class RedisStore {
       const snapshot = { version: 1, cursor: last.streamId, objects };
       await this.client.set(this.key(boardId, 'snapshot'), JSON.stringify(snapshot));
       await this.client.xTrim(this.key(boardId, 'ops'), 'MINID', `${last.streamId.split('-')[0]}-${Number(last.streamId.split('-')[1]) + 1}`);
-    } finally { await this.client.del(lock); }
+    } finally {
+      await this.client.eval("if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0", { keys: [lock], arguments: [token] }).catch(() => {});
+    }
   }
   async sync(boardId, cursor) {
     const snapshot = await this.ensureSnapshot(boardId);
@@ -269,6 +294,7 @@ class RedisStore {
     return { snapshot, operations, latestId: operations.at(-1)?.streamId || snapshot.cursor };
   }
   async append(boardId, operation) {
+    this.assertReady();
     const stream = this.key(boardId, 'ops');
     const dedupPrefix = this.key(boardId, 'dedup:');
     const rateKey = this.key(boardId, `rate:${operation.actor}:${Math.floor(Date.now() / 1000)}`);
@@ -280,7 +306,11 @@ class RedisStore {
       if count == 1 then redis.call('EXPIRE', KEYS[3], 2) end
       if count > tonumber(ARGV[3]) then return { 'rate_limited', 'limit' } end
       local event = cjson.decode(ARGV[2])
-      event.lamport = redis.call('INCR', KEYS[5])
+      local previous = tonumber(redis.call('GET', KEYS[5]) or '0')
+      local suggested = tonumber(event.lamport or 0)
+      local lamport = math.max(previous, suggested) + 1
+      redis.call('SET', KEYS[5], tostring(lamport))
+      event.lamport = lamport
       local id = redis.call('XADD', KEYS[1], '*', 'json', cjson.encode(event))
       event.streamId = id
       event.serverAt = tonumber(ARGV[4])
@@ -298,15 +328,18 @@ class RedisStore {
     return { streamId: result[0], duplicate: result[1] === 'duplicate' };
   }
   async presenceSet(boardId, person) {
+    this.assertReady();
     const key = this.key(boardId, `presence:${person.id}`);
     await this.client.set(key, JSON.stringify({ ...person, instanceId: INSTANCE_ID }), { EX: PRESENCE_TTL });
     await this.client.publish('syncboard:events', JSON.stringify({ type: 'presence', boardId, person: { ...person, instanceId: INSTANCE_ID } }));
   }
   async presenceDelete(boardId, id) {
+    this.assertReady();
     await this.client.del(this.key(boardId, `presence:${id}`));
     await this.client.publish('syncboard:events', JSON.stringify({ type: 'presence-left', boardId, id }));
   }
   async presenceList(boardId) {
+    this.assertReady();
     const keys = [];
     for await (const key of this.client.scanIterator({ MATCH: this.key(boardId, 'presence:*'), COUNT: 100 })) keys.push(key);
     if (!keys.length) return [];
@@ -314,15 +347,33 @@ class RedisStore {
     return values.filter(Boolean).map((raw) => JSON.parse(raw));
   }
   async generateBoard(boardId, count) {
+    this.assertReady();
+    if (boardId !== 'stress-demo') return false;
     const objects = {};
     const palettes = ['#e4edff', '#edf8d7', '#f9e3d7', '#f2e6ff', '#fff0b6'];
     for (let i = 0; i < count; i += 1) {
       const id = `load-${i}`;
       objects[id] = shape(id, i % 5 === 0 ? 'ellipse' : 'rect', (i % 100) * 180, Math.floor(i / 100) * 105, 70 + (i % 4) * 10, 42 + (i % 3) * 9, { rotation: (i % 5 - 2) * 2, fill: palettes[i % palettes.length], color: '#4b5670', stroke: '#aab5ca', strokeWidth: 1, text: '' });
     }
-    await this.client.set(this.key(boardId, 'snapshot'), JSON.stringify({ version: 1, cursor: '0-0', objects }));
+    objects['board-meta'] = shape('board-meta', 'meta', 0, 0, 0, 0, { title: '5,000 object stress board' });
+    const result = await this.client.eval(`
+      local raw = redis.call('GET', KEYS[1])
+      if raw then
+        local current = cjson.decode(raw)
+        if current.purpose ~= 'demo-seed' or redis.call('XLEN', KEYS[2]) > 0 then return 0 end
+      elseif redis.call('XLEN', KEYS[2]) > 0 then
+        return 0
+      end
+      redis.call('SET', KEYS[1], ARGV[1])
+      return 1
+    `, {
+      keys: [this.key(boardId, 'snapshot'), this.key(boardId, 'ops')],
+      arguments: [JSON.stringify({ version: 1, purpose: 'stress-demo', cursor: '0-0', objects })]
+    });
+    return Number(result) === 1;
   }
   async stats() {
+    this.assertReady();
     let users = 0; let operations = 0; let snapshotBytes = 0;
     const streams = []; const snapshots = [];
     for await (const key of this.client.scanIterator({ MATCH: 'syncboard:*:ops', COUNT: 100 })) streams.push(key);
@@ -351,43 +402,70 @@ class RedisStore {
 
 const store = REDIS_URL ? new RedisStore(REDIS_URL) : new FileStore();
 await store.start();
-const metrics = { received: 0, latencies: [], connected: 0 };
+const metrics = { received: 0, relayLatencies: [], connected: 0 };
+const metricsCache = { expiresAt: 0, value: null };
+const simulateRequests = new Map();
 const rooms = new Map();
 const app = createServer(async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
   if (url.pathname === '/api/health') {
-    const ok = store.mode !== 'redis' || store.client.isReady;
+    const ok = store.mode !== 'redis' || (store.client.isReady && store.subscriber.isReady);
     return json(response, ok ? 200 : 503, { ok, instance: INSTANCE_ID, store: store.mode, at: Date.now() });
   }
   if (url.pathname === '/api/metrics') {
-    const totals = await store.stats();
-    const sorted = [...metrics.latencies].sort((a, b) => a - b);
-    return json(response, 200, { ...totals, instance: INSTANCE_ID, p95: sorted[Math.floor(sorted.length * 0.95)] || 0, opsPerSecond: metrics.received, store: store.mode });
+    try {
+      if (!metricsCache.value || Date.now() >= metricsCache.expiresAt) {
+        metricsCache.value = await store.stats();
+        metricsCache.expiresAt = Date.now() + 10_000;
+      }
+      const sorted = [...metrics.relayLatencies].sort((a, b) => a - b);
+      return json(response, 200, { ...metricsCache.value, instance: INSTANCE_ID, relayP95: sorted[Math.floor(sorted.length * 0.95)] || 0, opsPerSecond: metrics.received, store: store.mode });
+    } catch (error) { return json(response, 503, { error: 'Metrics storage is unavailable.' }); }
   }
   const boardMatch = url.pathname.match(/^\/api\/boards\/([^/]+)$/);
   if (boardMatch && request.method === 'GET') {
     const boardId = safeBoardId(boardMatch[1]);
     if (!boardId) return json(response, 400, { error: 'Invalid board id.' });
-    try { return json(response, 200, await store.board(boardId)); }
+    try {
+      const board = await store.board(boardId);
+      return compressedJson(response, 200, { ...board, title: boardTitle(board.snapshot, board.operations) }, request);
+    }
     catch (error) { console.error('Board read failed', error); return json(response, 503, { error: 'Board storage is unavailable.' }); }
   }
   if (url.pathname === '/api/simulate' && request.method === 'POST') {
     try {
       const body = await readJson(request);
-      const boardId = safeBoardId(body.boardId || 'studio');
-      const count = Math.min(5000, Math.max(1, Number(body.count || 5000)));
-      if (!boardId) return json(response, 400, { error: 'Invalid board id.' });
+      const boardId = safeBoardId(body.boardId);
+      if (boardId !== 'stress-demo') return json(response, 400, { error: 'The shared 5,000 object canvas uses the stress-demo room.' });
+      if (Number(body.count) !== 5000) return json(response, 400, { error: 'The stress board must contain exactly 5,000 objects.' });
+      const requester = request.socket.remoteAddress || 'unknown';
+      const lastRequest = simulateRequests.get(requester) || 0;
+      if (Date.now() - lastRequest < 10_000) return json(response, 429, { error: 'Wait a few seconds before creating another stress board.' });
+      simulateRequests.set(requester, Date.now());
       const createdAt = Date.now();
-      await store.generateBoard(boardId, count);
-      return json(response, 200, { ok: true, count, elapsedMs: Date.now() - createdAt });
+      const created = await store.generateBoard(boardId, 5000);
+      if (!created) return json(response, 409, { error: 'The shared 5,000 object stress room already exists.' });
+      return json(response, 200, { ok: true, count: 5000, elapsedMs: Date.now() - createdAt });
     } catch (error) { console.error('Simulator failed', error); return json(response, 500, { error: 'Could not generate the board.' }); }
   }
-  return serveStatic(url.pathname, response);
+  return serveStatic(url.pathname, response, request);
 });
 
 function json(response, status, value) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
   response.end(JSON.stringify(value));
+}
+
+function compressedJson(response, status, value, request) {
+  const body = Buffer.from(JSON.stringify(value));
+  if (body.length < 4096 || !/\bgzip\b/i.test(request.headers['accept-encoding'] || '')) return json(response, status, value);
+  const compressed = gzipSync(body, { level: 1 });
+  response.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store',
+    'content-encoding': 'gzip', 'content-length': compressed.length, vary: 'accept-encoding',
+    'access-control-allow-origin': '*'
+  });
+  response.end(compressed);
 }
 
 function readJson(request) {
@@ -398,7 +476,7 @@ function readJson(request) {
   });
 }
 
-async function serveStatic(pathname, response) {
+async function serveStatic(pathname, response, request) {
   let path;
   try { path = decodeURIComponent(pathname === '/' ? '/index.html' : pathname).replace(/^[/\\]+/, ''); }
   catch { response.writeHead(400); return response.end('Bad request'); }
@@ -407,8 +485,16 @@ async function serveStatic(pathname, response) {
   try {
     const info = await stat(absolute);
     if (!info.isFile()) throw new Error('Not a file');
-    response.writeHead(200, { 'content-type': MIME[extname(absolute)] || 'application/octet-stream', 'cache-control': 'no-cache' });
-    response.end(await readFile(absolute));
+    const body = await readFile(absolute);
+    const contentType = MIME[extname(absolute)] || 'application/octet-stream';
+    if (body.length >= 4096 && /\bgzip\b/i.test(request.headers['accept-encoding'] || '')) {
+      const compressed = gzipSync(body, { level: 1 });
+      response.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-cache', 'content-encoding': 'gzip', 'content-length': compressed.length, vary: 'accept-encoding' });
+      response.end(compressed);
+    } else {
+      response.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-cache' });
+      response.end(body);
+    }
   } catch {
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); response.end('Not found');
   }
@@ -435,7 +521,10 @@ function roomRemove(boardId, client) {
 store.subscribe((message) => {
   if (message.type === 'operation') {
     metrics.received += 1;
-    if (message.serverAt) { metrics.latencies.push(Math.max(0, Number(message.serverAt) - Number(message.createdAt || message.serverAt))); if (metrics.latencies.length > 500) metrics.latencies.shift(); }
+    if (message.serverAt) {
+      metrics.relayLatencies.push(Math.max(0, Date.now() - Number(message.serverAt)));
+      if (metrics.relayLatencies.length > 500) metrics.relayLatencies.shift();
+    }
   }
   const room = rooms.get(message.boardId);
   if (!room) return;
@@ -463,7 +552,8 @@ wss.on('connection', (websocket, request, url) => {
         const person = { id: client.clientId, name: client.name, color: client.color, boardId, instanceId: INSTANCE_ID, cursor: null, activeObject: null, lastSeen: Date.now() };
         await store.presenceSet(boardId, person);
         const [presence, sync] = await Promise.all([store.presenceList(boardId), store.sync(boardId, String(message.cursor || ''))]);
-        send(client, { type: 'welcome', me: person, presence, sync, server: { instance: INSTANCE_ID, store: store.mode } });
+        client.lastPresence = Date.now();
+        send(client, { type: 'welcome', me: person, presence, sync, title: boardTitle(sync.snapshot, sync.operations), server: { instance: INSTANCE_ID, store: store.mode } });
         client.replaying = false;
         const buffered = client.buffer.splice(0).sort((a, b) => String(a.streamId).localeCompare(String(b.streamId)));
         const seen = new Set((sync.operations || []).map((operation) => operation.id));
@@ -480,12 +570,24 @@ wss.on('connection', (websocket, request, url) => {
         return;
       }
       if (message.type === 'presence') {
+        const now = Date.now();
+        if (now - client.lastPresence < 90) return;
+        client.lastPresence = now;
         const person = { id: client.clientId, name: client.name, color: client.color, boardId, instanceId: INSTANCE_ID, cursor: validPoint(message.cursor), activeObject: typeof message.activeObject === 'string' ? message.activeObject.slice(0, 100) : null, lastSeen: Date.now() };
         await store.presenceSet(boardId, person);
         return;
       }
       if (message.type === 'leave') await store.presenceDelete(boardId, client.clientId);
-    } catch (error) { console.error('WebSocket message failed', error); send(client, { type: 'error', message: 'The board service is reconnecting.' }); }
+    } catch (error) {
+      console.error('WebSocket message failed', error.message);
+      const storageUnavailable = error.code === 'storage_unavailable' || (store.mode === 'redis' && !store.client.isReady);
+      const operationId = message.type === 'op' ? message.operation?.id : undefined;
+      send(client, {
+        type: 'error', code: storageUnavailable ? 'storage_unavailable' : 'server_error', operationId,
+        message: storageUnavailable ? 'The shared store is reconnecting. Your edits are still queued on this device.' : 'The board service is reconnecting.'
+      });
+      if (storageUnavailable && websocket.readyState === WebSocket.OPEN) websocket.close(1013, 'Shared store unavailable');
+    }
   });
   websocket.on('close', () => {
     metrics.connected = Math.max(0, metrics.connected - 1);
@@ -504,7 +606,7 @@ function validateOperation(value, actor) {
   if (!value || typeof value !== 'object' || typeof value.id !== 'string' || value.id.length > 100 || !/^[a-zA-Z0-9:_-]+$/.test(value.id)) return null;
   if (typeof value.entityId !== 'string' || value.entityId.length > 100 || !/^[a-zA-Z0-9:_-]+$/.test(value.entityId)) return null;
   if (!['upsert', 'update', 'delete', 'restore'].includes(value.action)) return null;
-  const allowed = new Set(['type', 'x', 'y', 'w', 'h', 'rotation', 'fill', 'color', 'stroke', 'strokeWidth', 'fontSize', 'fontWeight', 'fontFamily', 'text', 'radius', 'label', 'points', 'arrow', 'opacity']);
+  const allowed = new Set(['type', 'x', 'y', 'w', 'h', 'rotation', 'fill', 'color', 'stroke', 'strokeWidth', 'fontSize', 'fontWeight', 'fontFamily', 'text', 'title', 'radius', 'label', 'points', 'arrow', 'opacity']);
   const fields = {};
   for (const [key, fieldValue] of Object.entries(value.fields || {}).slice(0, 32)) {
     if (!allowed.has(key)) continue;
@@ -519,3 +621,4 @@ function validateOperation(value, actor) {
 setInterval(() => { metrics.received = 0; }, 1000).unref();
 setInterval(() => { store.maintainSnapshots?.().catch((error) => console.error('Snapshot maintenance failed', error.message)); }, 15000).unref();
 app.listen(PORT, '0.0.0.0', () => console.log(`SyncBoard ${INSTANCE_ID} listening on :${PORT} (${store.mode})`));
+

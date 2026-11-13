@@ -19,7 +19,7 @@ Run `powershell -ExecutionPolicy Bypass -File .\tools\New-SyncBoardShortcut.ps1`
 
 ## Public demo deployment
 
-See [DEPLOYING.md](DEPLOYING.md) for the Render and Redis setup. The included `render.yaml` configures a public, phone-accessible web service with Redis-backed collaboration.
+See [DEPLOYING.md](DEPLOYING.md) for the Render and Redis setup. The public app is phone-accessible; the Blueprint includes a second public endpoint wired to the same Redis store for cross-instance judging. That Blueprint addition must be approved before the second endpoint is available.
 
 ## Run the two-instance Redis setup
 
@@ -32,6 +32,14 @@ docker compose -f compose.yml up --build
 Open [http://localhost:8080](http://localhost:8080). Nginx distributes HTTP and websocket connections across two stateless Node instances. Redis runs with AOF persistence and backs the operation streams, snapshots, idempotency keys, server clocks, and expiring presence records.
 
 The **Try 5,000 objects** action creates a separate stress board and loads it into the canvas. The app uses a canvas renderer and viewport culling so off-screen shapes do not need to be painted.
+
+For the public 200-client cross-instance run, use Node 20 and two different public endpoint URLs:
+
+```powershell
+npm run stress:200 -- https://syncboard-public-ebsk.onrender.com https://<second-render-service>.onrender.com
+```
+
+The script uses the isolated `stress-demo` board, sends concurrent edits to the same shape, verifies delivery to every connected client, compares the final board from both endpoints, and reports same-runner peer receive p95 and API read time.
 
 ## Collaboration model
 
@@ -50,4 +58,5 @@ The **Try 5,000 objects** action creates a separate stress board and loads it in
 - `public/styles.css` — responsive interface, interaction states, reduced-motion support, and CSS motion system.
 - `compose.yml` and `nginx.conf` — two app instances, Redis persistence, and websocket-aware load balancing.
 
-The challenge's 200-user / 150 ms / failover targets still need a live Redis and multi-browser load run in the deployment environment. The live panel tracks active boards and users, edits per second, delivery p95, reconnects, offline merges, and snapshot size.
+The 200-user, 150 ms, two-minute offline, one-second render, and failure targets still need live judging-device runs. The live panel's p95 is Redis relay delay, not end-to-end browser latency. See [the readiness matrix](docs/hackathon-readiness.md), [architecture](docs/architecture.md), and [design decision](docs/decision-record.md) for the exact proof boundary.
+

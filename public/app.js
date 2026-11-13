@@ -19,8 +19,7 @@ function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); 
 const query = new URLSearchParams(location.search);
 let boardId = query.get('board') || 'studio';
 if (!/^[a-zA-Z0-9_-]{1,80}$/.test(boardId)) boardId = 'studio';
-let storedClientId = safeRead('syncboard:clientId');
-if (!/^[a-zA-Z0-9_-]{8,80}$/.test(storedClientId)) { storedClientId = crypto.randomUUID(); safeWrite('syncboard:clientId', storedClientId); }
+const storedClientId = crypto.randomUUID();
 let displayName = safeRead('syncboard:name', 'Jamie').slice(0, 24) || 'Jamie';
 let actorColor = safeRead('syncboard:color', actorColors[Math.floor(Math.random() * actorColors.length)]);
 if (!/^#[0-9a-fA-F]{6}$/.test(actorColor)) actorColor = actorColors[0];
@@ -28,14 +27,15 @@ safeWrite('syncboard:color', actorColor);
 
 const state = {
   boardId, clientId: storedClientId, name: displayName, color: actorColor,
-  objects: new Map(), selected: new Set(), users: new Map(), cursors: new Map(), effects: new Map(),
+  objects: new Map(), selected: new Set(), users: new Map(), cursors: new Map(), cursorNodes: new Map(), effects: new Map(),
   tool: 'select', zoom: 1, panX: 0, panY: 0, spaceDown: false, shiftDown: false,
   drag: null, marquee: null, snapGuides: [], pending: new Map(), history: [], redo: [],
   lamport: 0, lastStreamId: safeRead(`syncboard:cursor:${boardId}`, '0-0'),
   socket: null, joined: false, everConnected: false, loading: true, canEdit: true, pointerWorld: null,
-  lastPresenceAt: 0, drawQueued: false, resizeObserver: null, db: null,
+  lastPresenceAt: 0, drawQueued: false, resizeObserver: null, db: null, reconnectAttempt: 0, reconnectTimer: 0,
+  liveObjectCount: 0, objectOrder: new Map(), nextObjectOrder: 0, worldBounds: null,
   activity: [], metrics: { p95: 28, ops: 0, users: 1 }, toastTimer: 0,
-  title: safeRead(`syncboard:title:${boardId}`, boardId.startsWith('stress-') ? 'A lot of little ideas' : 'The next big thing')
+  title: boardId.startsWith('stress-') ? 'A lot of little ideas' : 'The next big thing'
 };
 
 const canvas = $('#boardCanvas');
@@ -64,7 +64,7 @@ stage.addEventListener('pointerleave', () => {
 }, { passive: true });
 
 $('#boardTitle').value = state.title;
-$('.location-active').textContent = state.boardId.startsWith('stress-') ? '5,000 object stress board' : 'Untitled board';
+$('.location-active').textContent = state.boardId.startsWith('stress-') ? '5,000 object stress board' : `Shared room · ${state.boardId}`;
 document.title = `${state.title} — SyncBoard`;
 
 function requestDraw() {
@@ -90,18 +90,83 @@ function objectBounds(item) {
   return { x: x1, y: y1, w: Math.max(1, x2 - x1), h: Math.max(1, y2 - y1) };
 }
 
+const SPATIAL_CELL_SIZE = 512;
+const MAX_OBJECT_CELLS = 256;
+const spatialGrid = new Map();
+const objectCells = new Map();
+const largeSpatialObjects = new Set();
+
+function removeSpatialIndex(id) {
+  if (!objectCells.has(id)) return;
+  const keys = objectCells.get(id);
+  if (keys === null) largeSpatialObjects.delete(id);
+  else for (const key of keys) {
+    const bucket = spatialGrid.get(key);
+    bucket?.delete(id);
+    if (bucket?.size === 0) spatialGrid.delete(key);
+  }
+  objectCells.delete(id);
+}
+
+function indexSpatialObject(item) {
+  removeSpatialIndex(item.id);
+  if (!item || item._deleted || item.id === 'board-meta') return;
+  const bounds = objectBounds(item);
+  const extent = state.worldBounds;
+  state.worldBounds = extent ? {
+    x: Math.min(extent.x, bounds.x), y: Math.min(extent.y, bounds.y),
+    w: Math.max(extent.x + extent.w, bounds.x + bounds.w) - Math.min(extent.x, bounds.x),
+    h: Math.max(extent.y + extent.h, bounds.y + bounds.h) - Math.min(extent.y, bounds.y)
+  } : { ...bounds };
+  const left = Math.floor(bounds.x / SPATIAL_CELL_SIZE); const top = Math.floor(bounds.y / SPATIAL_CELL_SIZE);
+  const right = Math.floor((bounds.x + bounds.w) / SPATIAL_CELL_SIZE); const bottom = Math.floor((bounds.y + bounds.h) / SPATIAL_CELL_SIZE);
+  const cellCount = (right - left + 1) * (bottom - top + 1);
+  if (cellCount > MAX_OBJECT_CELLS) { largeSpatialObjects.add(item.id); objectCells.set(item.id, null); return; }
+  const keys = [];
+  for (let x = left; x <= right; x += 1) for (let y = top; y <= bottom; y += 1) {
+    const key = `${x},${y}`; keys.push(key);
+    const bucket = spatialGrid.get(key) || new Set(); bucket.add(item.id); spatialGrid.set(key, bucket);
+  }
+  objectCells.set(item.id, keys);
+}
+
+function rebuildSpatialIndex() {
+  spatialGrid.clear(); objectCells.clear(); largeSpatialObjects.clear(); state.objectOrder.clear();
+  state.liveObjectCount = 0; state.nextObjectOrder = 0; state.worldBounds = null;
+  for (const item of state.objects.values()) {
+    state.objectOrder.set(item.id, state.nextObjectOrder++);
+    if (!item._deleted && item.id !== 'board-meta') state.liveObjectCount += 1;
+    indexSpatialObject(item);
+  }
+}
+
+function querySpatialObjects(area) {
+  const left = Math.floor(area.x / SPATIAL_CELL_SIZE); const top = Math.floor(area.y / SPATIAL_CELL_SIZE);
+  const right = Math.floor((area.x + area.w) / SPATIAL_CELL_SIZE); const bottom = Math.floor((area.y + area.h) / SPATIAL_CELL_SIZE);
+  if ((right - left + 1) * (bottom - top + 1) > 4096) {
+    return activeObjects().filter((item) => {
+      const bounds = objectBounds(item);
+      return bounds.x + bounds.w >= area.x && bounds.y + bounds.h >= area.y && bounds.x <= area.x + area.w && bounds.y <= area.y + area.h;
+    });
+  }
+  const ids = new Set(largeSpatialObjects);
+  for (let x = left; x <= right; x += 1) for (let y = top; y <= bottom; y += 1) {
+    for (const id of spatialGrid.get(`${x},${y}`) || []) ids.add(id);
+  }
+  return [...ids].map((id) => state.objects.get(id)).filter((item) => {
+    if (!item || item._deleted) return false;
+    const bounds = objectBounds(item);
+    return bounds.x + bounds.w >= area.x && bounds.y + bounds.h >= area.y && bounds.x <= area.x + area.w && bounds.y <= area.y + area.h;
+  }).sort((a, b) => (state.objectOrder.get(a.id) || 0) - (state.objectOrder.get(b.id) || 0));
+}
+
 function drawCanvas() {
   if (!ctx) return;
   const width = canvas.width; const height = canvas.height; const ratio = Math.min(window.devicePixelRatio || 1, 2);
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, width, height);
   ctx.setTransform(ratio * state.zoom, 0, 0, ratio * state.zoom, ratio * state.panX, ratio * state.panY);
   const view = { x: -state.panX / state.zoom - 300, y: -state.panY / state.zoom - 300, w: width / ratio / state.zoom + 600, h: height / ratio / state.zoom + 600 };
-  for (const item of state.objects.values()) {
-    if (item._deleted || item.id === 'board-meta') continue;
-    const bounds = objectBounds(item);
-    if (bounds.x + bounds.w < view.x || bounds.y + bounds.h < view.y || bounds.x > view.x + view.w || bounds.y > view.y + view.h) continue;
-    drawObject(item);
-  }
+  for (const item of querySpatialObjects(view)) drawObject(item);
   drawSelection();
   drawCreationPreview();
   drawMarquee();
@@ -253,7 +318,7 @@ function screenToWorld(clientX, clientY) {
 }
 
 function hitTest(point) {
-  const list = activeObjects();
+  const list = querySpatialObjects({ x: point.x - 3, y: point.y - 3, w: 6, h: 6 });
   for (let index = list.length - 1; index >= 0; index -= 1) {
     const item = list[index]; const box = objectBounds(item);
     if (point.x >= box.x - 3 && point.x <= box.x + box.w + 3 && point.y >= box.y - 3 && point.y <= box.y + box.h + 3) return item;
@@ -278,6 +343,14 @@ function selectTool(tool) {
   canvas.style.cursor = tool === 'hand' || state.spaceDown ? 'grab' : tool === 'text' || tool === 'sticky' || ['rect', 'ellipse', 'connector', 'draw'].includes(tool) ? 'crosshair' : 'default';
 }
 
+function updateBoardTitle(value) {
+  const title = String(value || 'Untitled board').trim().slice(0, 60) || 'Untitled board';
+  state.title = title;
+  document.title = `${title} — SyncBoard`;
+  const input = $('#boardTitle');
+  if (input && document.activeElement !== input) input.value = title;
+}
+
 function applyOperation(operation, { local = false, redraw = true } = {}) {
   if (!operation?.entityId) return;
   state.lamport = Math.max(state.lamport, Number(operation.lamport || 0)) + (local ? 0 : 1);
@@ -285,7 +358,10 @@ function applyOperation(operation, { local = false, redraw = true } = {}) {
     state.lastStreamId = operation.streamId;
     safeWrite(`syncboard:cursor:${boardId}`, state.lastStreamId);
   }
-  const current = state.objects.get(operation.entityId) || { id: operation.entityId, _clocks: {}, _deleted: false };
+  const previous = state.objects.get(operation.entityId);
+  const current = previous || { id: operation.entityId, _clocks: {}, _deleted: false };
+  const wasActive = Boolean(previous && !previous._deleted && previous.id !== 'board-meta');
+  removeSpatialIndex(operation.entityId);
   const isNewObject = !state.objects.has(operation.entityId) && ['upsert', 'restore'].includes(operation.action);
   const next = { ...current, _clocks: { ...(current._clocks || {}) } };
   const stamp = [Number(operation.lamport || 1), String(operation.actor || '')];
@@ -296,6 +372,11 @@ function applyOperation(operation, { local = false, redraw = true } = {}) {
   if (operation.action === 'delete' && compareStamp(stamp, next._clocks._deleted) >= 0) { next._deleted = true; next._clocks._deleted = stamp; }
   if (operation.action === 'restore' && compareStamp(stamp, next._clocks._deleted) >= 0) { next._deleted = false; next._clocks._deleted = stamp; }
   state.objects.set(operation.entityId, next);
+  if (!state.objectOrder.has(operation.entityId)) state.objectOrder.set(operation.entityId, state.nextObjectOrder++);
+  const isActive = !next._deleted && next.id !== 'board-meta';
+  if (wasActive !== isActive) state.liveObjectCount += isActive ? 1 : -1;
+  indexSpatialObject(next);
+  if (next.id === 'board-meta' && typeof next.title === 'string') updateBoardTitle(next.title);
   if (isNewObject) state.effects.set(operation.entityId, Date.now());
   if (operation.actor === state.clientId && state.pending.has(operation.id)) removePending(operation.id);
   if (redraw) { requestDraw(); renderCounts(); scheduleCache(); }
@@ -369,11 +450,12 @@ function removePending(id) {
 
 let cacheTimer = 0;
 function scheduleCache() {
-  clearTimeout(cacheTimer);
+  if (cacheTimer) return;
   cacheTimer = setTimeout(() => {
+    cacheTimer = 0;
     if (!state.db) return;
     try { state.db.transaction('boards', 'readwrite').objectStore('boards').put({ boardId, lastStreamId: state.lastStreamId, objects: [...state.objects.values()] }); } catch { /* Browser storage may be full. */ }
-  }, 450);
+  }, 750);
 }
 
 function openDatabase() {
@@ -409,20 +491,21 @@ async function loadBoard() {
   const cached = await dbRead('boards', boardId);
   const queue = await loadOutbox();
   for (const operation of queue) state.pending.set(operation.id, operation);
-  try {
-    const response = await fetch(`/api/boards/${encodeURIComponent(boardId)}`, { cache: 'no-store' });
-    if (!response.ok) throw new Error(`Board request returned ${response.status}`);
-    const data = await response.json();
-    installSnapshot(data.snapshot, data.operations || []);
-    if (data.title) state.title = data.title;
-    state.lastStreamId = data.latestId || data.snapshot?.cursor || '0-0';
-  } catch (error) {
-    if (cached?.objects?.length) {
-      state.objects = new Map(cached.objects.map((item) => [item.id, item]));
-      state.lastStreamId = cached.lastStreamId || state.lastStreamId;
-      setConnection('offline');
-      toast('You’re offline. Your last saved canvas is here.');
-    } else {
+  if (cached?.objects?.length) {
+    state.objects = new Map(cached.objects.map((item) => [item.id, item]));
+    rebuildSpatialIndex();
+    state.lastStreamId = cached.lastStreamId || '0-0';
+    const sharedTitle = cached.objects.find((item) => item.id === 'board-meta')?.title;
+    if (sharedTitle) updateBoardTitle(sharedTitle);
+  } else {
+    try {
+      const response = await fetch(`/api/boards/${encodeURIComponent(boardId)}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`Board request returned ${response.status}`);
+      const data = await response.json();
+      installSnapshot(data.snapshot, data.operations || []);
+      if (data.title) updateBoardTitle(data.title);
+      state.lastStreamId = data.latestId || data.snapshot?.cursor || '0-0';
+    } catch {
       setConnection('offline');
       toast('Board storage is offline. Your edits will wait on this device.');
     }
@@ -436,7 +519,7 @@ async function loadBoard() {
 }
 
 function installSnapshot(snapshot, operations) {
-  if (snapshot?.objects) state.objects = new Map(Object.values(snapshot.objects).map((item) => [item.id, item]));
+  if (snapshot?.objects) { state.objects = new Map(Object.values(snapshot.objects).map((item) => [item.id, item])); rebuildSpatialIndex(); }
   for (const operation of operations) applyOperation(operation, { redraw: false });
   if (snapshot?.cursor && compareStream(snapshot.cursor, state.lastStreamId) > 0) state.lastStreamId = snapshot.cursor;
 }
@@ -447,6 +530,7 @@ function connectSocket() {
   const socket = new WebSocket(`${protocol}//${location.host}/collab?board=${encodeURIComponent(boardId)}`);
   state.socket = socket; state.joined = false;
   socket.addEventListener('open', () => {
+    clearTimeout(state.reconnectTimer); state.reconnectTimer = 0;
     setConnection('connecting');
     socket.send(JSON.stringify({ type: 'join', boardId, clientId: state.clientId, name: state.name, color: state.color, cursor: state.lastStreamId, reconnect: state.everConnected }));
   });
@@ -456,7 +540,13 @@ function connectSocket() {
   });
   socket.addEventListener('close', () => {
     state.joined = false;
-    if (state.socket === socket) { setConnection(navigator.onLine ? 'offline' : 'offline'); setTimeout(connectSocket, 1400 + Math.random() * 700); }
+    if (state.socket === socket) {
+      setConnection('offline');
+      const delay = Math.min(10_000, 750 * (2 ** Math.min(state.reconnectAttempt, 4))) * (.75 + Math.random() * .5);
+      state.reconnectAttempt += 1;
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = setTimeout(connectSocket, delay);
+    }
   });
   socket.addEventListener('error', () => { /* close event schedules reconnect */ });
 }
@@ -464,9 +554,12 @@ function connectSocket() {
 function handleSocketMessage(message) {
   if (message.type === 'welcome') {
     state.joined = true; state.everConnected = true; state.lastStreamId = message.sync?.latestId || state.lastStreamId;
+    state.reconnectAttempt = 0;
+    if (message.title) updateBoardTitle(message.title);
     if (message.sync?.snapshot) {
       const localPending = [...state.pending.values()];
       state.objects = new Map(Object.values(message.sync.snapshot.objects || {}).map((item) => [item.id, item]));
+      rebuildSpatialIndex();
       for (const operation of message.sync.operations || []) applyOperation(operation, { redraw: false });
       for (const operation of localPending) applyOperation(operation, { local: true, redraw: false });
     } else for (const operation of message.sync?.operations || []) applyOperation(operation, { redraw: false });
@@ -482,17 +575,23 @@ function handleSocketMessage(message) {
     applyOperation(message);
     if (message.actor !== state.clientId) addActivity(message.actor, message.entityId, message.action);
     if (message.actor === state.clientId && state.pending.has(message.id)) removePending(message.id);
-    renderCounts(); renderInspector(); renderLayersIfVisible(); renderHistory();
+    if (state.selected.has(message.entityId)) renderInspector();
+    renderLayersIfVisible();
     return;
   }
   if (message.type === 'presence') {
     const person = message.person;
     if (!person || person.id === state.clientId) return;
-    state.users.set(person.id, person); renderPresence(); renderCursors();
+    const previous = state.users.get(person.id);
+    state.users.set(person.id, person);
+    if (!previous || previous.activeObject !== person.activeObject) renderPresence();
+    else renderCursor(person);
     return;
   }
   if (message.type === 'presence-left') {
-    state.users.delete(message.id); state.cursors.delete(message.id); renderPresence(); renderCursors();
+    state.users.delete(message.id); state.cursors.delete(message.id);
+    state.cursorNodes.get(message.id)?.remove(); state.cursorNodes.delete(message.id);
+    renderPresence(); renderCursors();
     return;
   }
   if (message.type === 'ack') { removePending(message.operationId); if (message.streamId && compareStream(message.streamId, state.lastStreamId) > 0) state.lastStreamId = message.streamId; return; }
@@ -500,7 +599,10 @@ function handleSocketMessage(message) {
     if (message.operationId && message.code === 'rate_limited') {
       const operation = state.pending.get(message.operationId);
       if (operation) setTimeout(() => { if (state.socket?.readyState === WebSocket.OPEN && state.joined) state.socket.send(JSON.stringify({ type: 'op', operation })); }, 1100);
-    } else if (message.operationId) removePending(message.operationId);
+    } else if (message.code === 'storage_unavailable') {
+      setConnection('offline');
+      if (state.socket?.readyState === WebSocket.OPEN) state.socket.close(1013, 'Shared store unavailable');
+    }
     toast(message.message || 'The edit could not sync.');
     return;
   }
@@ -508,6 +610,9 @@ function handleSocketMessage(message) {
 
 function sendPresence() {
   if (state.socket?.readyState !== WebSocket.OPEN || !state.joined) return;
+  const now = performance.now();
+  if (now - state.lastPresenceAt < 100) return;
+  state.lastPresenceAt = now;
   state.socket.send(JSON.stringify({ type: 'presence', cursor: state.pointerWorld, activeObject: [...state.selected][0] || null }));
 }
 
@@ -532,7 +637,7 @@ function updateSyncUi() {
 }
 
 function renderCounts() {
-  const count = activeObjects().length;
+  const count = state.liveObjectCount;
   $('#objectCount').innerHTML = `<span class="count-spark">✳</span><strong>${count.toLocaleString()}</strong><span>object${count === 1 ? '' : 's'}</span>`;
   $('#layersBadge').textContent = count.toLocaleString();
   $('#peopleCount').textContent = String(state.users.size || 1);
@@ -550,18 +655,29 @@ function renderPresence() {
   renderCursors();
 }
 
+function renderCursor(person) {
+  if (!person || person.id === state.clientId || !person.cursor) return;
+  let cursor = state.cursorNodes.get(person.id);
+  if (!cursor) {
+    cursor = document.createElement('div'); cursor.className = 'remote-cursor'; cursor.dataset.id = person.id;
+    cursorLayer.append(cursor); state.cursorNodes.set(person.id, cursor);
+  }
+  const color = person.color || '#8299ee'; const name = person.name || 'Collaborator';
+  if (cursor.dataset.color !== color || cursor.dataset.name !== name) {
+    cursor.dataset.color = color; cursor.dataset.name = name;
+    cursor.innerHTML = `<svg viewBox="0 0 24 24" fill="${escapeHtml(color)}" stroke="white" stroke-width="1.6" stroke-linejoin="round"><path d="M4 2.8 19.5 14l-7.1.7-3.7 6.1L4 2.8Z"/></svg><span class="remote-cursor-label" style="background:${escapeHtml(color)}">${escapeHtml(name)}</span>`;
+  }
+  const x = person.cursor.x * state.zoom + state.panX; const y = person.cursor.y * state.zoom + state.panY;
+  cursor.style.transform = `translate3d(${x}px,${y}px,0)`;
+}
+
 function renderCursors() {
-  const existing = new Map([...cursorLayer.children].map((node) => [node.dataset.id, node]));
+  const active = new Set();
   for (const person of state.users.values()) {
     if (person.id === state.clientId || !person.cursor) continue;
-    const cursor = existing.get(person.id) || document.createElement('div');
-    cursor.className = 'remote-cursor'; cursor.dataset.id = person.id;
-    cursor.innerHTML = `<svg viewBox="0 0 24 24" fill="${escapeHtml(person.color || '#8299ee')}" stroke="white" stroke-width="1.6" stroke-linejoin="round"><path d="M4 2.8 19.5 14l-7.1.7-3.7 6.1L4 2.8Z"/></svg><span class="remote-cursor-label" style="background:${escapeHtml(person.color || '#8299ee')}">${escapeHtml(person.name || 'Collaborator')}</span>`;
-    const x = person.cursor.x * state.zoom + state.panX; const y = person.cursor.y * state.zoom + state.panY;
-    cursor.style.transform = `translate3d(${x}px,${y}px,0)`;
-    cursorLayer.append(cursor); existing.delete(person.id);
+    active.add(person.id); renderCursor(person);
   }
-  for (const node of existing.values()) node.remove();
+  for (const [id, node] of state.cursorNodes) if (!active.has(id)) { node.remove(); state.cursorNodes.delete(id); }
 }
 
 function renderInspector() {
@@ -590,7 +706,12 @@ function renderInspector() {
   $('#deleteSelected', editor)?.addEventListener('click', deleteSelection);
 }
 
-function renderLayersIfVisible() { if ($('.inspector-tab.active')?.dataset.panel === 'layers') renderLayers(); }
+let layersRenderQueued = false;
+function renderLayersIfVisible() {
+  if ($('.inspector-tab.active')?.dataset.panel !== 'layers' || layersRenderQueued) return;
+  layersRenderQueued = true;
+  requestAnimationFrame(() => { layersRenderQueued = false; if ($('.inspector-tab.active')?.dataset.panel === 'layers') renderLayers(); });
+}
 
 function renderLayers() {
   const objects = activeObjects().slice().reverse();
@@ -605,8 +726,14 @@ function addActivity(actor, entityId, action) {
   const person = state.users.get(actor) || { id: actor, name: 'A collaborator', color: '#d8e1fb' };
   const item = state.objects.get(entityId);
   state.activity.unshift({ name: person.name, color: person.color, action, label: item?.label || item?.text?.split('\n')[0] || 'an idea', at: Date.now() });
-  state.activity = state.activity.slice(0, 20); renderHistory();
+  state.activity = state.activity.slice(0, 20);
+  if (!activityRenderQueued) {
+    activityRenderQueued = true;
+    requestAnimationFrame(() => { activityRenderQueued = false; renderHistory(); });
+  }
 }
+
+let activityRenderQueued = false;
 
 function formatBytes(bytes) {
   if (!bytes) return '0 KB';
@@ -666,9 +793,8 @@ function zoomAt(scale, screenPoint = { x: stage.clientWidth / 2, y: stage.client
 function updateZoomUi() { $('#zoomValue').textContent = `${Math.round(state.zoom * 100)}%`; }
 
 function updateMiniMap() {
-  const objects = activeObjects();
   const visible = { x: -state.panX / state.zoom, y: -state.panY / state.zoom, w: stage.clientWidth / state.zoom, h: stage.clientHeight / state.zoom };
-  const all = objects.length ? objects.map(objectBounds).reduce((box, item) => { const x = Math.min(box.x, item.x); const y = Math.min(box.y, item.y); const right = Math.max(box.x + box.w, item.x + item.w); const bottom = Math.max(box.y + box.h, item.y + item.h); return { x, y, w: right - x, h: bottom - y }; }) : { x: 0, y: 0, w: 1, h: 1 };
+  const all = state.worldBounds || { x: 0, y: 0, w: 1, h: 1 };
   const minimap = $('#miniMap'); const inner = $('.mini-map-glow', minimap);
   const sx = 75 / Math.max(all.w, 1); const sy = 39 / Math.max(all.h, 1); const factor = Math.min(sx, sy);
   const width = clamp(visible.w * factor, 11, 77); const height = clamp(visible.h * factor, 8, 43);
@@ -762,7 +888,7 @@ canvas.addEventListener('pointerdown', (event) => {
 
 canvas.addEventListener('pointermove', (event) => {
   const point = screenToWorld(event.clientX, event.clientY); state.pointerWorld = point;
-  const now = performance.now(); if (now - state.lastPresenceAt > 55) { state.lastPresenceAt = now; sendPresence(); }
+  sendPresence();
   if (!state.drag) { if (state.tool === 'select') canvas.style.cursor = hitTest(point) ? 'move' : 'default'; return; }
   const drag = state.drag;
   if (drag.type === 'pan') { state.panX = drag.panX + event.clientX - drag.clientX; state.panY = drag.panY + event.clientY - drag.clientY; renderCursors(); requestDraw(); return; }
@@ -839,9 +965,20 @@ function setInspectorPanel(panel) {
 $$('.inspector-tab').forEach((tab) => tab.addEventListener('click', () => setInspectorPanel(tab.dataset.panel)));
 
 $('#inviteButton').addEventListener('click', () => openShareDialog()); $('#addPersonButton').addEventListener('click', () => openShareDialog());
-function openShareDialog() { $('#shareUrl').textContent = `${location.host}${location.pathname}?board=${encodeURIComponent(boardId)}`; $('#shareDialog').showModal(); }
+function sharedBoardUrl() {
+  const link = new URL(location.href);
+  link.searchParams.set('board', boardId);
+  link.hash = '';
+  return link.href;
+}
+function openShareDialog() {
+  const link = sharedBoardUrl(); const linkElement = $('#shareUrl');
+  linkElement.textContent = link; linkElement.href = link;
+  $('#shareRoomId').textContent = boardId;
+  $('#shareDialog').showModal();
+}
 $('#copyLink').addEventListener('click', async () => {
-  const link = `${location.origin}${location.pathname}?board=${encodeURIComponent(boardId)}`;
+  const link = sharedBoardUrl();
   try { await navigator.clipboard.writeText(link); $('#copyLink').innerHTML = `${svgIcon('check')} Copied`; toast('Board link copied. Bring your people in.'); }
   catch { toast(link); }
 });
@@ -854,16 +991,18 @@ $('#nameForm').addEventListener('submit', (event) => {
 });
 $('#dismissTip').addEventListener('click', () => $('.inspector-bottom').classList.add('hidden'));
 $('#loadTestButton').addEventListener('click', generateTestBoard);
-$('#boardTitle').addEventListener('change', (event) => { state.title = event.target.value.trim().slice(0, 60) || 'Untitled board'; safeWrite(`syncboard:title:${boardId}`, state.title); document.title = `${state.title} — SyncBoard`; });
+$('#boardTitle').addEventListener('change', (event) => {
+  updateBoardTitle(event.target.value);
+  localOperation('board-meta', 'update', { title: state.title }, { recordHistory: false });
+});
 
 async function generateTestBoard() {
   const button = $('#loadTestButton'); const old = button.innerHTML;
   button.disabled = true; button.innerHTML = '<span class="toast-spinner"></span><span>Building a big board…</span>';
-  const stressId = `stress-${Date.now().toString(36)}`;
+  const stressId = 'stress-demo';
   try {
     const response = await fetch('/api/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ boardId: stressId, count: 5000 }) });
-    if (!response.ok) throw new Error('Could not create the 5,000 object canvas.');
-    await response.json();
+    if (!response.ok && response.status !== 409) throw new Error('Could not create the 5,000 object canvas.');
     location.href = `/?board=${encodeURIComponent(stressId)}`;
   } catch (error) { toast(error.message || 'Could not create the canvas.'); button.disabled = false; button.innerHTML = old; }
 }
@@ -897,7 +1036,7 @@ if ('ResizeObserver' in window) { state.resizeObserver = new ResizeObserver(resi
 async function refreshMetrics() {
   try {
     const response = await fetch('/api/metrics', { cache: 'no-store' }); if (!response.ok) return;
-    const data = await response.json(); state.metrics = { p95: data.p95 || 28, ops: data.opsPerSecond || 0, users: data.users || 1 };
+    const data = await response.json(); state.metrics = { p95: data.relayP95 || 0, ops: data.opsPerSecond || 0, users: data.users || 1 };
     $('#metricOps').textContent = String(state.metrics.ops); $('#metricP95').innerHTML = `${Math.round(state.metrics.p95)}<small>ms</small>`;
     $('#metricUsers').textContent = String(Math.max(state.users.size, data.users, 1)); $('#latencyLabel').textContent = `${Math.max(1, Math.round(state.metrics.p95))} ms`;
     $('#metricBoards').textContent = String(data.boards ?? 1); $('#metricReconnects').textContent = String(data.reconnections ?? 0);
@@ -912,14 +1051,17 @@ setInterval(() => {
 setInterval(() => {
   const now = Date.now(); let changed = false;
   for (const [id, person] of state.users) {
-    if (id !== state.clientId && person.lastSeen && now - person.lastSeen > 5200) { state.users.delete(id); changed = true; }
+    if (id !== state.clientId && person.lastSeen && now - person.lastSeen > 4000) {
+      state.users.delete(id); state.cursorNodes.get(id)?.remove(); state.cursorNodes.delete(id); changed = true;
+    }
   }
   if (changed) renderPresence();
-}, 1800);
-setInterval(refreshMetrics, 2400);
+}, 500);
+setInterval(refreshMetrics, 5000);
 setInterval(() => {
   if (!state.joined && navigator.onLine) connectSocket();
 }, 6000);
 
 selectTool('select'); resizeCanvas(); renderPresence(); renderHistory(); updateZoomUi();
 loadBoard();
+

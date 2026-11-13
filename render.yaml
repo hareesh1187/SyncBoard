@@ -14,3 +14,22 @@ services:
         value: syncboard-public
       - key: REDIS_URL
         sync: false
+  - type: web
+    name: syncboard-instance-b
+    runtime: docker
+    region: singapore
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: INSTANCE_ID
+        value: syncboard-instance-b
+      - key: REDIS_URL
+        fromService:
+          name: syncboard-public-ebsk
+          type: web
+          envVarKey: REDIS_URL
+

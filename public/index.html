@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#080c18" />
+  <meta name="theme-color" content="#f4f5f1" />
   <meta name="description" content="A living canvas for ideas that move at the speed of thought." />
   <title>SyncBoard — Ideas in motion</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -160,7 +160,7 @@
             <div class="section-heading"><span>Live pulse</span><span class="live-now"><i></i> NOW</span></div>
             <div class="pulse-card">
               <div class="pulse-graph"><span class="pulse-line line-one"></span><span class="pulse-line line-two"></span><span class="pulse-glow"></span></div>
-              <div class="pulse-stats"><div><strong id="metricOps">0</strong><span>edits / sec</span></div><div><strong id="metricP95">28<small>ms</small></strong><span>delivery p95</span></div></div>
+              <div class="pulse-stats"><div><strong id="metricOps">0</strong><span>edits / sec</span></div><div><strong id="metricP95">0<small>ms</small></strong><span>Redis relay p95</span></div></div>
               <div class="pulse-foot"><span><i></i> <b id="metricUsers">1</b> collaborators</span><span id="storageMode">LOCAL</span></div>
               <div class="observability-grid"><div><strong id="metricBoards">1</strong><span>active boards</span></div><div><strong id="metricReconnects">0</strong><span>reconnects</span></div><div><strong id="metricOffline">0</strong><span>offline merges</span></div><div><strong id="metricSnapshot">0 KB</strong><span>snapshot size</span></div></div>
             </div>
@@ -191,8 +191,8 @@
       <span class="eyebrow">BETTER IDEAS, TOGETHER</span>
       <h2>Bring your people in.</h2>
       <p>One link. One shared canvas. A hundred directions worth exploring.</p>
-      <div class="share-link-row"><span id="shareUrl">syncboard.app/board/studio</span><button type="button" id="copyLink"><svg><use href="#i-link"/></svg> Copy link</button></div>
-      <div class="share-note"><span class="share-lock">✳</span> Anyone with the link can edit this board.</div>
+      <div class="share-link-row"><a id="shareUrl" href="#" target="_blank" rel="noopener">Loading shared board link…</a><button type="button" id="copyLink"><svg><use href="#i-link"/></svg> Copy link</button></div>
+      <div class="share-note"><span class="share-lock">✳</span><span>Same team room: <code id="shareRoomId">studio</code>. Everyone with this link edits this board.</span></div>
     </form>
   </dialog>
 
@@ -210,3 +210,4 @@
   <script type="module" src="/app.js"></script>
 </body>
 </html>
+
