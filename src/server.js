@@ -507,7 +507,9 @@ app.on('upgrade', (request, socket, head) => {
   wss.handleUpgrade(request, socket, head, (websocket) => wss.emit('connection', websocket, request, url));
 });
 
-function send(client, payload) { if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(payload)); }
+function send(client, payload) {
+  if (client.websocket.readyState === WebSocket.OPEN) client.websocket.send(JSON.stringify(payload));
+}
 
 function roomAdd(boardId, client) {
   const room = rooms.get(boardId) || new Set(); room.add(client); rooms.set(boardId, room);
@@ -621,4 +623,3 @@ function validateOperation(value, actor) {
 setInterval(() => { metrics.received = 0; }, 1000).unref();
 setInterval(() => { store.maintainSnapshots?.().catch((error) => console.error('Snapshot maintenance failed', error.message)); }, 15000).unref();
 app.listen(PORT, '0.0.0.0', () => console.log(`SyncBoard ${INSTANCE_ID} listening on :${PORT} (${store.mode})`));
-

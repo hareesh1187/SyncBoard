@@ -966,17 +966,17 @@ $$('.inspector-tab').forEach((tab) => tab.addEventListener('click', () => setIns
 
 $('#inviteButton').addEventListener('click', () => openShareDialog()); $('#addPersonButton').addEventListener('click', () => openShareDialog());
 function sharedBoardUrl() {
-  const link = new URL(location.href);
+  const link = new URL(location.pathname, location.origin);
   link.searchParams.set('board', boardId);
-  link.hash = '';
   return link.href;
 }
 function openShareDialog() {
   const link = sharedBoardUrl(); const linkElement = $('#shareUrl');
-  linkElement.textContent = link; linkElement.href = link;
+  linkElement.value = link;
   $('#shareRoomId').textContent = boardId;
   $('#shareDialog').showModal();
 }
+$('#shareUrl').addEventListener('click', (event) => event.currentTarget.select());
 $('#copyLink').addEventListener('click', async () => {
   const link = sharedBoardUrl();
   try { await navigator.clipboard.writeText(link); $('#copyLink').innerHTML = `${svgIcon('check')} Copied`; toast('Board link copied. Bring your people in.'); }
@@ -1064,4 +1064,3 @@ setInterval(() => {
 
 selectTool('select'); resizeCanvas(); renderPresence(); renderHistory(); updateZoomUi();
 loadBoard();
-

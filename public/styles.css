@@ -264,8 +264,7 @@ dialog::backdrop { background: rgba(28,36,49,.35); backdrop-filter: blur(5px); a
 .share-card h2, .name-card h2 { margin: 0; color: #273246; font: 800 24px/1.2 Manrope,sans-serif; letter-spacing: -1px; }
 .share-card > p, .name-card > p { margin: 9px 0 20px; color: #838e9c; font-size: 11px; line-height: 1.6; }
 .share-link-row { display: flex; align-items: center; justify-content: space-between; gap: 9px; padding: 7px; border: 1px solid #e8ebe4; border-radius: 10px; background: #fafbf8; }
-.share-link-row > a { min-width: 0; flex: 1 1 auto; overflow: hidden; padding-left: 5px; color: #667386; font: 9px 'DM Mono',monospace; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
-.share-link-row > a:hover { color: #4768b9; text-decoration: underline; }
+.share-link-row > input { min-width: 0; flex: 1 1 auto; width: 0; padding: 5px; border: 0; outline: 0; color: #667386; background: transparent; font: 9px 'DM Mono',monospace; text-overflow: ellipsis; cursor: text; }
 .share-link-row button { height: 31px; flex: 0 0 auto; display: flex; align-items: center; gap: 5px; padding: 0 9px; border: 0; border-radius: 7px; color: #32402a; background: #ddf2b4; font-size: 9px; font-weight: 700; cursor: pointer; transition: background .15s, transform .15s; }
 .share-link-row button:hover { background: #d0eca0; transform: translateY(-1px); }
 .share-link-row button svg { width: 13px; height: 13px; }
@@ -480,4 +479,3 @@ dialog::backdrop { background: rgba(28,36,49,.35); backdrop-filter: blur(5px); a
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
-
