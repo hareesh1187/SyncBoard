@@ -20,7 +20,11 @@ const query = new URLSearchParams(location.search);
 let boardId = query.get('board') || 'studio';
 if (!/^[a-zA-Z0-9_-]{1,80}$/.test(boardId)) boardId = 'studio';
 const storedClientId = crypto.randomUUID();
-let displayName = safeRead('syncboard:name', 'Jamie').slice(0, 24) || 'Jamie';
+const savedName = safeRead('syncboard:name', '').trim();
+const nameWasCustomized = safeRead('syncboard:name-customized', '') === '1';
+const needsUniqueName = !savedName || (!nameWasCustomized && ['Jamie', 'Explorer'].includes(savedName));
+let displayName = (needsUniqueName ? `Guest ${crypto.randomUUID().slice(0, 5).toUpperCase()}` : savedName).slice(0, 24);
+if (needsUniqueName) safeWrite('syncboard:name', displayName);
 let actorColor = safeRead('syncboard:color', actorColors[Math.floor(Math.random() * actorColors.length)]);
 if (!/^#[0-9a-fA-F]{6}$/.test(actorColor)) actorColor = actorColors[0];
 safeWrite('syncboard:color', actorColor);
@@ -986,7 +990,7 @@ $('#profileButton').addEventListener('click', () => { $('#nameInput').value = st
 $('#nameForm').addEventListener('submit', (event) => {
   event.preventDefault();
   const name = $('#nameInput').value.trim().slice(0, 24); if (!name) return;
-  state.name = name; safeWrite('syncboard:name', name); $('#nameDialog').close(); renderPresence();
+  state.name = name; safeWrite('syncboard:name', name); safeWrite('syncboard:name-customized', '1'); $('#nameDialog').close(); renderPresence();
   if (state.socket?.readyState === WebSocket.OPEN) { state.socket.close(); state.joined = false; setTimeout(connectSocket, 100); }
 });
 $('#dismissTip').addEventListener('click', () => $('.inspector-bottom').classList.add('hidden'));

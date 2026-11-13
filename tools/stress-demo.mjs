@@ -2,16 +2,19 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import WebSocket from 'ws';
 
-const [firstEndpoint, secondEndpoint] = process.argv.slice(2);
+const [firstEndpoint, secondEndpoint, requestedUsers = process.env.STRESS_CLIENTS || '200'] = process.argv.slice(2);
 if (!firstEndpoint || !secondEndpoint) {
-  console.error('Usage: npm run stress:200 -- <instance-a-url> <instance-b-url>');
+  console.error('Usage: npm run stress:200 -- <instance-a-url> <instance-b-url> [user-count]');
   process.exit(2);
+}
+const clientCount = Number(requestedUsers);
+if (!Number.isInteger(clientCount) || clientCount < 2 || clientCount > 200) {
+  throw new Error('User count must be an integer between 2 and 200.');
 }
 
 const endpoints = [new URL(firstEndpoint).origin, new URL(secondEndpoint).origin];
 if (endpoints[0] === endpoints[1]) throw new Error('Pass two different public SyncBoard endpoints.');
 const boardId = 'stress-demo';
-const clientCount = 200;
 const clients = [];
 const sendTimes = new Map();
 const latencies = [];
@@ -119,7 +122,7 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   const missingClients = clients.filter((client) => client.seen.size !== clientCount).length;
-  if (missingClients) throw new Error(`${missingClients} clients did not receive every one of the 200 concurrent edits.`);
+  if (missingClients) throw new Error(`${missingClients} clients did not receive every one of the ${clientCount} concurrent edits.`);
 
   const [boardA, boardB] = await Promise.all(endpoints.map((endpoint) => getJson(`${endpoint}/api/boards/${boardId}`)));
   const finalA = finalLoadZero(boardA); const finalB = finalLoadZero(boardB);

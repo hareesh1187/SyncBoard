@@ -312,6 +312,7 @@ class RedisStore {
       redis.call('SET', KEYS[5], tostring(lamport))
       event.lamport = lamport
       local id = redis.call('XADD', KEYS[1], '*', 'json', cjson.encode(event))
+      event.type = 'operation'
       event.streamId = id
       event.serverAt = tonumber(ARGV[4])
       local packed = cjson.encode(event)
