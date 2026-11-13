@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: syncboard-public
+    runtime: docker
+    region: singapore
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: INSTANCE_ID
+        value: syncboard-public
+      - key: REDIS_URL
+        sync: false

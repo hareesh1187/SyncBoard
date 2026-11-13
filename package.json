@@ -1,0 +1,18 @@
+{
+  "name": "syncboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A real-time collaborative whiteboard powered by Redis Streams.",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "redis": "^4.7.0",
+    "ws": "^8.18.0"
+  }
+}
